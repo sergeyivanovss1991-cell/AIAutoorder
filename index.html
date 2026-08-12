@@ -374,7 +374,7 @@
 
     .settings-grid {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       padding: 24px 7px;
       border: 1px solid var(--line);
       border-radius: 16px;
@@ -960,6 +960,15 @@
           </div>
           <small>Необязательное минимальное количество для каждой позиции</small>
         </label>
+
+        <label class="setting-field">
+          <span>Кратность заказа</span>
+          <div class="number-input">
+            <input id="rounding-multiple" type="number" min="1" step="1" value="1">
+            <b>шт.</b>
+          </div>
+          <small>Округляет количество к заказу вверх: 10, 20, 30 или любое другое число</small>
+        </label>
       </div>
 
       <div class="error-box" id="error-box"></div>
@@ -1063,7 +1072,7 @@
     </div>
   </footer>
 
-  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script>
     (function () {
       "use strict";
@@ -1639,6 +1648,10 @@
           const targetDays = Math.min(100, Math.max(1, toNumber(document.getElementById("target-days").value)));
           const safetyDays = Math.min(100, Math.max(0, toNumber(document.getElementById("safety-days").value)));
           const minimumStock = Math.max(0, toNumber(document.getElementById("minimum-stock").value));
+          const roundingMultiple = Math.max(
+            1,
+            Math.floor(toNumber(document.getElementById("rounding-multiple").value))
+          );
 
           const stockMap = aggregateRows(state.stock, "stock");
           const salesMap = aggregateRows(state.sales, "sales");
@@ -1656,7 +1669,10 @@
             const safetyStock = Math.ceil(dailySales * safetyDays);
             const forecastStock = mainForecastStock + safetyStock;
             const targetStock = Math.max(forecastStock, minimumStock);
-            const orderQuantity = Math.max(0, Math.ceil(targetStock - stock));
+            const calculatedOrderQuantity = Math.max(0, Math.ceil(targetStock - stock));
+            const orderQuantity = calculatedOrderQuantity > 0
+              ? Math.ceil(calculatedOrderQuantity / roundingMultiple) * roundingMultiple
+              : 0;
             const daysLeft = dailySales > 0 ? stock / dailySales : null;
             const purchasePrice = Math.max(0, stockItem.purchasePrice || 0);
             const orderCost = orderQuantity * purchasePrice;
@@ -1673,6 +1689,12 @@
             }
             if (safetyDays > 0 && dailySales > 0 && orderQuantity > 0) {
               reasons.push("Учтён страховой запас на " + safetyDays + " дн.");
+            }
+            if (
+              calculatedOrderQuantity > 0 &&
+              orderQuantity !== calculatedOrderQuantity
+            ) {
+              reasons.push("Округлено вверх до кратности " + roundingMultiple + " шт.");
             }
             if (orderQuantity === 0) {
               reasons.push("Запас достаточный");
@@ -1867,6 +1889,21 @@
             }
 
             clearError();
+
+            if (selected.includes("orderCost")) {
+              ["orderQuantity", "purchasePrice"].forEach(function (requiredKey) {
+                if (!selected.includes(requiredKey)) {
+                  selected.push(requiredKey);
+                  const requiredInput = elements.exportColumnsList.querySelector(
+                    'input[value="' + requiredKey + '"]'
+                  );
+                  if (requiredInput) {
+                    requiredInput.checked = true;
+                  }
+                }
+              });
+            }
+
             state.exportColumns = selected;
           });
         });
@@ -1887,8 +1924,128 @@
           }),
           widths: selectedColumns.map(function (column) {
             return column.width;
-          })
+          }),
+          columns: selectedColumns
         };
+      }
+
+      function applyOrderSheetFormatting(sheet, orderData, items) {
+        const columns = orderData.columns;
+        const keyToColumnIndex = {};
+
+        columns.forEach(function (column, index) {
+          keyToColumnIndex[column.key] = index;
+        });
+
+        const orderQuantityIndex = keyToColumnIndex.orderQuantity;
+        const purchasePriceIndex = keyToColumnIndex.purchasePrice;
+        const orderCostIndex = keyToColumnIndex.orderCost;
+        const greenFill = { fgColor: { rgb: "70AD47" } };
+        const lightGreenFill = { fgColor: { rgb: "E2F0D9" } };
+        const thinBorder = {
+          top: { style: "thin", color: { rgb: "D9E2D9" } },
+          bottom: { style: "thin", color: { rgb: "D9E2D9" } },
+          left: { style: "thin", color: { rgb: "D9E2D9" } },
+          right: { style: "thin", color: { rgb: "D9E2D9" } }
+        };
+
+        if (orderQuantityIndex !== undefined) {
+          const headerAddress = XLSX.utils.encode_cell({ r: 0, c: orderQuantityIndex });
+          if (sheet[headerAddress]) {
+            sheet[headerAddress].s = {
+              fill: greenFill,
+              font: { bold: true, color: { rgb: "FFFFFF" } },
+              alignment: { horizontal: "center", vertical: "center" },
+              border: thinBorder
+            };
+          }
+
+          items.forEach(function (item, itemIndex) {
+            const address = XLSX.utils.encode_cell({ r: itemIndex + 1, c: orderQuantityIndex });
+            if (sheet[address]) {
+              sheet[address].s = {
+                fill: lightGreenFill,
+                font: { bold: true, color: { rgb: "006100" } },
+                alignment: { horizontal: "center", vertical: "center" },
+                border: thinBorder
+              };
+            }
+          });
+        }
+
+        if (
+          orderQuantityIndex !== undefined &&
+          purchasePriceIndex !== undefined &&
+          orderCostIndex !== undefined
+        ) {
+          items.forEach(function (item, itemIndex) {
+            const quantityAddress = XLSX.utils.encode_cell({ r: itemIndex + 1, c: orderQuantityIndex });
+            const priceAddress = XLSX.utils.encode_cell({ r: itemIndex + 1, c: purchasePriceIndex });
+            const costAddress = XLSX.utils.encode_cell({ r: itemIndex + 1, c: orderCostIndex });
+            sheet[costAddress] = {
+              t: "n",
+              v: Number(item.orderCost.toFixed(2)),
+              f: quantityAddress + "*" + priceAddress,
+              z: '#,##0.00 "₽"'
+            };
+          });
+        }
+
+        if (orderCostIndex !== undefined && items.length) {
+          const totalRowIndex = items.length + 2;
+          const totalCostAddress = XLSX.utils.encode_cell({ r: totalRowIndex, c: orderCostIndex });
+          const labelColumnIndex = Math.max(0, orderCostIndex - 1);
+          const totalLabelAddress = XLSX.utils.encode_cell({ r: totalRowIndex, c: labelColumnIndex });
+
+          sheet[totalLabelAddress] = {
+            t: "s",
+            v: "ИТОГО",
+            s: {
+              fill: greenFill,
+              font: { bold: true, color: { rgb: "FFFFFF" } },
+              alignment: { horizontal: "right" },
+              border: thinBorder
+            }
+          };
+
+          const totalValue = Number(items.reduce(function (sum, item) {
+            return sum + item.orderCost;
+          }, 0).toFixed(2));
+
+          if (orderQuantityIndex !== undefined && purchasePriceIndex !== undefined) {
+            const firstCostAddress = XLSX.utils.encode_cell({ r: 1, c: orderCostIndex });
+            const lastCostAddress = XLSX.utils.encode_cell({ r: items.length, c: orderCostIndex });
+            sheet[totalCostAddress] = {
+              t: "n",
+              v: totalValue,
+              f: "SUM(" + firstCostAddress + ":" + lastCostAddress + ")",
+              z: '#,##0.00 "₽"',
+              s: {
+                fill: greenFill,
+                font: { bold: true, color: { rgb: "FFFFFF" } },
+                alignment: { horizontal: "right" },
+                border: thinBorder
+              }
+            };
+          } else {
+            sheet[totalCostAddress] = {
+              t: "n",
+              v: totalValue,
+              z: '#,##0.00 "₽"',
+              s: {
+                fill: greenFill,
+                font: { bold: true, color: { rgb: "FFFFFF" } },
+                alignment: { horizontal: "right" },
+                border: thinBorder
+              }
+            };
+          }
+
+          const range = XLSX.utils.decode_range(sheet["!ref"]);
+          range.e.r = Math.max(range.e.r, totalRowIndex);
+          range.e.c = Math.max(range.e.c, orderCostIndex);
+          sheet["!ref"] = XLSX.utils.encode_range(range);
+        }
       }
 
       function exportResults() {
@@ -1909,22 +2066,22 @@
           const allData = makeExportRows(state.results);
 
           const workbook = XLSX.utils.book_new();
+          workbook.Workbook = workbook.Workbook || {};
+          workbook.Workbook.CalcPr = {
+            calcMode: "auto",
+            fullCalcOnLoad: true,
+            forceFullCalc: true
+          };
           const orderSheet = XLSX.utils.json_to_sheet(orderData.rows);
           const allSheet = XLSX.utils.json_to_sheet(allData.rows);
 
           setColumnWidths(orderSheet, orderData.widths);
           setColumnWidths(allSheet, allData.widths);
 
-          if (orderData.rows.length && state.exportColumns.includes("orderCost")) {
-            const totalCost = state.results
-              .filter(function (item) { return item.orderQuantity > 0; })
-              .reduce(function (sum, item) { return sum + item.orderCost; }, 0);
-            XLSX.utils.sheet_add_aoa(
-              orderSheet,
-              [["ИТОГО", Number(totalCost.toFixed(2))]],
-              { origin: { r: orderData.rows.length + 2, c: Math.max(0, orderData.widths.length - 2) } }
-            );
-          }
+          const orderItems = state.results.filter(function (item) {
+            return item.orderQuantity > 0;
+          });
+          applyOrderSheetFormatting(orderSheet, orderData, orderItems);
 
           if (orderSheet["!ref"]) {
             orderSheet["!autofilter"] = { ref: orderSheet["!ref"] };
